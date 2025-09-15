@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agro URL Monitor – Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
+    h1 { margin-bottom: 0.25rem; }
+    .muted { color: #666; margin-top: 0; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+    @media (min-width: 1000px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; }
+    .pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .ok { background: #e6f6ec; color: #116b3d; }
+    .down { background: #fde8e8; color: #991b1b; }
+    .small { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Agro URL Monitor</h1>
+  <p class="muted">Histórico em <code>history.csv</code>. Atualize esta página após novos runs do Cypress.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Falhas por execução</h3>
+      <canvas id="failuresChart" height="140"></canvas>
+      <p class="small">Soma de URLs com status fora da lista de OK por timestamp.</p>
+    </div>
+    <div class="card">
+      <h3>Último status por URL</h3>
+      <table id="lastStatusTable">
+        <thead><tr><th>URL</th><th>Último Status</th><th>Grupo</th><th>Última Execução</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Disponibilidade (7 últimos dias)</h3>
+      <table id="availabilityTable">
+        <thead><tr><th>URL</th><th>OK %</th><th>Execuções</th><th>Grupo</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const OK = new Set([200,201,202,204,301,302,303,304,307,308]); // deve espelhar cypress.config.js
+
+    async function loadCsv() {
+      const resp = await fetch('history.csv', { cache: 'no-store' });
+      if (!resp.ok) return [];
+      const text = await resp.text();
+      const lines = text.trim().split(/\r?\n/);
+      const header = lines.shift();
+      const idx = header.split(',');
+      const out = [];
+      for (const ln of lines) {
+        const [timestamp, url, status, duration_ms, group] = ln.split(/,(.+)?/)[0] ? ln.split(',') : [];
+        if (!timestamp) continue;
+        out.push({ timestamp, url, status: Number(status), duration_ms: Number(duration_ms||0), group });
+      }
+      return out;
+    }
+
+    function groupBy(arr, key) {
+      return arr.reduce((acc, item) => {
+        const k = item[key];
+        acc[k] = acc[k] || [];
+        acc[k].push(item);
+        return acc;
+      }, {});
+    }
+
+    function toDate(ts) { return new Date(ts); }
+
+    function withinDays(ts, days) {
+      const d = toDate(ts);
+      const cutoff = new Date(Date.now() - days*24*60*60*1000);
+      return d >= cutoff;
+    }
+
+    function renderFailuresChart(rows) {
+      const byTs = groupBy(rows, 'timestamp');
+      const labels = Object.keys(byTs).sort();
+      const data = labels.map(ts => byTs[ts].filter(r => !OK.has(r.status)).length);
+      const ctx = document.getElementById('failuresChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets: [{ label: 'Falhas', data }] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: { x: { ticks: { maxRotation: 45, minRotation: 45 } } }
+        }
+      });
+    }
+
+    function renderLastStatus(rows) {
+      const byUrl = groupBy(rows, 'url');
+      const latest = Object.entries(byUrl).map(([url, list]) => {
+        list.sort((a,b)=> toDate(b.timestamp)-toDate(a.timestamp));
+        return list[0];
+      }).sort((a,b)=> a.url.localeCompare(b.url));
+      const tbody = document.querySelector('#lastStatusTable tbody');
+      for (const r of latest) {
+        const pill = OK.has(r.status) ? '<span class="pill ok">OK</span>' : '<span class="pill down">DOWN</span>';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><a href="${r.url}" target="_blank" rel="noopener">${r.url}</a></td>
+                        <td>${r.status} ${pill}</td>
+                        <td>${r.group||''}</td>
+                        <td>${new Date(r.timestamp).toLocaleString()}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderAvailability(rows) {
+      const last7 = rows.filter(r => withinDays(r.timestamp, 7));
+      const byUrl = groupBy(last7, 'url');
+      const summary = Object.entries(byUrl).map(([url, list]) => {
+        const ok = list.filter(r => OK.has(r.status)).length;
+        const pct = list.length ? Math.round(ok / list.length * 100) : 0;
+        const group = list[0]?.group || '';
+        return { url, okPct: pct, runs: list.length, group };
+      }).sort((a,b)=> b.okPct - a.okPct);
+      const tbody = document.querySelector('#availabilityTable tbody');
+      for (const s of summary) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><a href="${s.url}" target="_blank" rel="noopener">${s.url}</a></td>
+                        <td>${s.okPct}%</td>
+                        <td>${s.runs}</td>
+                        <td>${s.group}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    (async () => {
+      const rows = await loadCsv();
+      if (rows.length === 0) return;
+      renderFailuresChart(rows);
+      renderLastStatus(rows);
+      renderAvailability(rows);
+    })();
+  </script>
+</body>
+</html>

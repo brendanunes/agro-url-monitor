@@ -1,0 +1,16 @@
+{
+  "name": "agro-url-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cypress-based URL availability monitor with a simple static dashboard.",
+  "scripts": {
+    "test": "cypress run",
+    "open": "cypress open",
+    "monitor": "cypress run --browser chrome --headless",
+    "serve:dashboard": "npx http-server ./dashboard -p 8080"
+  },
+  "devDependencies": {
+    "cypress": "^13.13.0",
+    "http-server": "^14.1.1"
+  }
+}
