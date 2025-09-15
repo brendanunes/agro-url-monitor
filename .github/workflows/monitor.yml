@@ -2,14 +2,14 @@ name: URL Monitor & Pages
 
 on:
   schedule:
-    - cron: "*/30 * * * *"          # roda a cada 30 minutos (ajuste se quiser)
-  workflow_dispatch: {}              # permite rodar manualmente
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
   push:
-    branches: ["main"]               # publica também quando fizer push na main
+    branches: ["main"]
 
 permissions:
-  contents: write                    # precisa para commitar o history.csv
-  pages: write                       # precisa para publicar no Pages
+  contents: write
+  pages: write
   id-token: write
 
 concurrency:
@@ -32,13 +32,12 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      # (Opcional) Defina okStatuses via env se quiser só 200–204:
-      # env:
-      #   CYPRESS_okStatuses: '[200,201,202,204]'
+      # Roda Cypress; se falhar, os próximos steps ainda rodam por causa do `if: always()`
       - name: Run Cypress (headless)
         run: npm run monitor
 
       - name: Commit history and dashboard
+        if: always()
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore(monitor): update history.csv"
@@ -47,13 +46,70 @@ jobs:
             dashboard/index.html
             urls/*.json
 
-      # Publica a pasta "dashboard" como raiz do site (index.html já está lá)
+      # 🔔 Notificar o Teams com o resumo do último run
+      - name: Notify Microsoft Teams
+        if: always()
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const https = require('https');
+          const urlmod = require('url');
+
+          const hook = process.env.TEAMS_WEBHOOK_URL;
+          if (!hook) { console.error('Missing TEAMS_WEBHOOK_URL'); process.exit(1); }
+
+          // espelhe os status "OK" do cypress.config.js, se mudar lá, mude aqui
+          const OK = new Set([200,201,202,204,301,302,303,304,307,308]);
+
+          const csv = fs.readFileSync('dashboard/history.csv','utf8').trim().split(/\r?\n/);
+          if (csv.length < 2) {
+            console.log('No data in history.csv yet.');
+            process.exit(0);
+          }
+          csv.shift(); // header
+          const rows = csv.map(l => {
+            const [timestamp,url,status,duration_ms,group] = l.split(',');
+            return { timestamp, url, status:+status, duration_ms:+duration_ms, group };
+          });
+          const lastTs = rows[rows.length-1].timestamp;
+          const batch = rows.filter(r => r.timestamp === lastTs);
+          const down = batch.filter(r => !OK.has(r.status));
+
+          const title = down.length
+            ? `⚠️ ${down.length}/${batch.length} URLs DOWN`
+            : `✅ ${batch.length} URLs OK`;
+          const list = down.slice(0, 12).map(r => `• ${r.status} – ${r.url}`).join('\\n');
+
+          const body = {
+            text: `${title}\n${list ? list + '\n' : ''}\nDashboard: https://brendanunes.github.io/agro-url-monitor/`
+          };
+
+          const u = urlmod.parse(hook);
+          const data = Buffer.from(JSON.stringify(body));
+          const opts = {
+            method: 'POST',
+            hostname: u.hostname,
+            path: u.path,
+            headers: {'Content-Type':'application/json','Content-Length':data.length}
+          };
+          const req = https.request(opts, res => {
+            console.log('Teams response:', res.statusCode);
+            res.resume();
+          });
+          req.on('error', e => { console.error('Teams error', e); process.exit(1); });
+          req.write(data); req.end();
+          NODE
+
       - name: Upload pages artifact
+        if: always()
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./dashboard
 
   deploy:
+    if: always()
     needs: monitor
     environment:
       name: github-pages
